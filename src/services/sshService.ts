@@ -5,13 +5,18 @@ import type { FileEntry } from '@/utils/fileUtils'
 interface ConnectionOptions {
   connectionString: string
   password: string
+  path?: string
 }
 
 export async function listRemoteDirectories(options: ConnectionOptions): Promise<FileEntry[]> {
   try {
-    const result = (await invoke('list_remote_directories', {
+    // Добавляем команду ls с указанным путем
+    const command = options.path ? `ls -la "${options.path}"` : 'ls -la'
+
+    const result = (await invoke('execute_ssh_command', {
       connectionString: options.connectionString,
       password: options.password,
+      command: command,
     })) as string[]
 
     return parseDirectoryListing(result)

@@ -1,12 +1,12 @@
-import { ref, onMounted }
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { invoke } from '@tauri-apps/api/tauri'
+
 import { platform } from '@tauri-apps/api/os'
 import ConnectionForm from '@/components/ConnectionForm.vue'
 import WindowsHelp from '@/components/WindowsHelp.vue'
 import DirectoryViewer from '@/components/DirectoryViewer.vue'
-import { FileEntry, parseDirectoryListing } from '@/utils/fileUtils'
+import { FileEntry } from '@/utils/fileUtils'
+import { listRemoteDirectories } from '@/services/sshService'
 
 // состояния
 const connectionString = ref('')
@@ -15,7 +15,8 @@ const fileEntries = ref<FileEntry[]>([])
 const error = ref('')
 const loading = ref(false)
 const connected = ref(false)
-const currentDirectory = ref('')
+const currentPath = ref('/')
+const pathHistory = ref<string[]>(['/'])
 const connectionStatus = ref('Не подключено')
 const isWindows = ref(false)
 const windowsHelpText = ref('')
@@ -33,7 +34,7 @@ onMounted(async () => {
   }
 })
 
-// подключение и получение списка
+// подключение и получение списка корневой директории
 async function connectAndListDirectories(connString: string, pass: string) {
   if (!connString) {
     error.value = 'Введите username@serverip'
@@ -48,15 +49,19 @@ async function connectAndListDirectories(connString: string, pass: string) {
   fileEntries.value = []
 
   try {
-    const result = (await invoke('list_remote_directories', {
+    // Сбрасываем путь и историю при новом подключении
+    currentPath.value = '/'
+    pathHistory.value = ['/']
+
+    // Вызываем обновленный метод для получения файлов
+    fileEntries.value = await listRemoteDirectories({
       connectionString: connectionString.value,
       password: password.value,
-    })) as string[]
+      path: currentPath.value,
+    })
 
     connectionStatus.value = 'Успешное подключение'
     connected.value = true
-    currentDirectory.value = '/'
-    fileEntries.value = parseDirectoryListing(result)
   } catch (err) {
     connectionStatus.value = 'Ошибка подключения'
     error.value = String(err)
@@ -66,27 +71,52 @@ async function connectAndListDirectories(connString: string, pass: string) {
   }
 }
 
-// парсер ls -la
-function parseDirectoryListing(listing: string[]): FileEntry[] {
-  return listing
-    .filter((l) => !l.startsWith('total'))
-    .map((line) => {
-      const parts = line.trim().split(/\s+/)
-      if (parts.length < 8) return { name: line, type: 'unknown' }
+// Функция для изменения текущего пути и загрузки содержимого
+async function changePath(newPath: string) {
+  if (newPath === currentPath.value) return
 
-      const permissions = parts[0]
-      const type = permissions.startsWith('d')
-        ? 'directory'
-        : permissions.startsWith('l')
-          ? 'symlink'
-          : 'file'
+  loading.value = true
+  error.value = ''
 
-      const size = parts[4]
-      const date = `${parts[5]} ${parts[6]} ${parts[7]}`
-      const name = parts.slice(8).join(' ')
-      return { name, type, size, permissions, date }
+  try {
+    // Получаем содержимое новой директории
+    const entries = await listRemoteDirectories({
+      connectionString: connectionString.value,
+      password: password.value,
+      path: newPath,
     })
-    .filter((e) => e.name !== '.' && e.name !== '..')
+
+    // Обновляем текущий путь и добавляем его в историю
+    currentPath.value = newPath
+
+    // Если перешли в новый путь, добавляем его в историю
+    if (!pathHistory.value.includes(newPath)) {
+      pathHistory.value.push(newPath)
+    }
+    // Если вернулись назад, обрезаем историю до текущего пути
+    else {
+      const index = pathHistory.value.indexOf(newPath)
+      pathHistory.value = pathHistory.value.slice(0, index + 1)
+    }
+
+    fileEntries.value = entries
+  } catch (err) {
+    error.value = `Ошибка при переходе в директорию ${newPath}: ${err}`
+  } finally {
+    loading.value = false
+  }
+}
+
+// Навигация назад
+function navigateBack() {
+  if (pathHistory.value.length > 1) {
+    // Возвращаемся к предыдущему пути
+    const previousIndex = pathHistory.value.indexOf(currentPath.value) - 1
+    if (previousIndex >= 0) {
+      const previousPath = pathHistory.value[previousIndex]
+      changePath(previousPath)
+    }
+  }
 }
 
 // отключение и возврат к экрану подключения
@@ -94,6 +124,8 @@ function disconnect() {
   connected.value = false
   connectionStatus.value = 'Не подключено'
   fileEntries.value = []
+  currentPath.value = '/'
+  pathHistory.value = ['/']
 }
 
 // обработчик ошибок из WindowsHelp
@@ -105,6 +137,11 @@ function handleWindowsError(errorMessage: string) {
 <template>
   <div class="container">
     <h1>SSH Подключение</h1>
+
+    <!-- Сообщение об ошибке - показывается всегда, если есть ошибка -->
+    <div v-if="error" class="error-message">
+      <p v-for="(line, index) in error.split('\n')" :key="index">{{ line }}</p>
+    </div>
 
     <!-- Форма подключения - показывается только когда нет подключения -->
     <div v-if="!connected">
@@ -129,9 +166,12 @@ function handleWindowsError(errorMessage: string) {
       v-if="connected"
       :file-entries="fileEntries"
       :connection-string="connectionString"
-      :current-directory="currentDirectory"
+      :current-path="currentPath"
+      :path-history="pathHistory"
       :loading="loading"
       @disconnect="disconnect"
+      @change-path="changePath"
+      @navigate-back="navigateBack"
     />
   </div>
 </template>
@@ -146,5 +186,14 @@ function handleWindowsError(errorMessage: string) {
 h1 {
   margin-bottom: 10px;
   color: #333;
+}
+
+.error-message {
+  color: #d32f2f;
+  background-color: #ffebee;
+  padding: 10px;
+  border-radius: 4px;
+  border-left: 4px solid #d32f2f;
+  margin-bottom: 15px;
 }
 </style>

@@ -36,6 +36,48 @@ fn open_powershell_with_command(_window: Window, command: String) -> Result<(), 
     }
 }
 
+#[command]
+fn execute_ssh_command(_window: Window,
+                        connection_string: String,
+                        password: String,
+                        command: String) -> Result<Vec<String>, String> {
+    // разбиваем user@host
+    let mut parts = connection_string.splitn(2, '@');
+    let user = parts.next().ok_or("Неверный формат подключения")?;
+    let host = parts.next().ok_or("Неверный формат подключения")?;
+    let addr = format!("{}:22", host);
+
+    // подключаемся по TCP
+    let tcp = TcpStream::connect(&addr)
+        .map_err(|e| format!("Не удалось подключиться к {}: {}", addr, e))?;
+    let mut sess = Session::new().unwrap();
+    sess.set_tcp_stream(tcp);
+    sess.handshake()
+        .map_err(|e| format!("SSH handshake failed: {}", e))?;
+    sess.userauth_password(user, &password)
+        .map_err(|e| format!("Аутентификация не удалась: {}", e))?;
+
+    // открываем сессию и выполняем команду
+    let mut channel = sess.channel_session()
+        .map_err(|e| format!("Не удалось открыть канал: {}", e))?;
+    channel.exec(&command)
+        .map_err(|e| format!("Не удалось выполнить команду: {}", e))?;
+    let mut output = String::new();
+    channel.read_to_string(&mut output)
+        .map_err(|e| format!("Не удалось прочитать вывод: {}", e))?;
+    channel.wait_close().ok();
+
+    // парсим строки
+    let lines = output
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect::<Vec<_>>();
+    
+    Ok(lines)
+}
+
+
 #[cfg(not(target_os = "windows"))]
 fn try_sshpass(connection_string: &str, password: &str) -> Result<Vec<String>, String> {
     // Проверяем наличие sshpass
@@ -123,7 +165,7 @@ fn main() {
     
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
-            list_remote_directories,
+            execute_ssh_command,
             open_powershell_with_command
         ])
         .run(context)
