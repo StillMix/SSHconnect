@@ -1,3 +1,4 @@
+//src-tauri/src/main.rs
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::process::{Command, Stdio};
@@ -7,7 +8,7 @@ use std::time::Duration;
 use tauri::{command, Window};
 
 #[command]
-fn list_remote_directories(window: Window, connection_string: String, password: String) -> Result<Vec<String>, String> {
+fn list_remote_directories(_window: Window, connection_string: String, password: String) -> Result<Vec<String>, String> {
     let parts: Vec<&str> = connection_string.split('@').collect();
     if parts.len() != 2 {
         return Err("Неверный формат строки подключения. Используйте формат username@serverip".to_string());
@@ -99,4 +100,3 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
-

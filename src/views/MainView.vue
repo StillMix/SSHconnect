@@ -9,7 +9,6 @@ const showPassword = ref(false)
 const directories = ref<string[]>([])
 const error = ref('')
 const loading = ref(false)
-const isPuttyAvailable = ref(false)
 
 onMounted(async () => {
   // Проверяем операционную систему
