@@ -1,49 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::process::{Command, Stdio};
-use std::io::{Write, BufReader, BufRead};
-use std::thread;
-use std::time::Duration;
+use std::process::{Command};
 use tauri::{command, Window};
-
-#[command]
-fn list_remote_directories(_window: Window, connection_string: String, password: String) -> Result<Vec<String>, String> {
-    let parts: Vec<&str> = connection_string.split('@').collect();
-    if parts.len() != 2 {
-        return Err("Неверный формат строки подключения. Используйте формат username@serverip".to_string());
-    }
-
-    let _username = parts[0];
-    let _server = parts[1];
-    
-    // Сначала проверим, является ли система Windows
-    #[cfg(target_os = "windows")]
-    {
-        // Пробуем использовать команду cmd для перенаправления пароля в ssh
-        match try_windows_ssh(connection_string.as_str(), password.as_str()) {
-            Ok(directories) => return Ok(directories),
-            Err(e) => {
-                eprintln!("Windows SSH метод не удался: {}", e);
-                // Если метод Windows SSH не сработал, пробуем прямой SSH
-                return try_direct_ssh(&connection_string, &password);
-            }
-        }
-    }
-    
-    // Для Linux/Mac
-    #[cfg(not(target_os = "windows"))]
-    {
-        // Пробуем сначала sshpass
-        match try_sshpass(&connection_string, &password) {
-            Ok(directories) => return Ok(directories),
-            Err(e) => {
-                eprintln!("sshpass метод не удался: {}", e);
-                // Пробуем прямой SSH
-                return try_direct_ssh(&connection_string, &password);
-            }
-        }
-    }
-}
+use ssh2::Session;
+use std::net::TcpStream;
+use std::io::Read;
 
 #[command]
 fn open_powershell_with_command(_window: Window, command: String) -> Result<(), String> {
@@ -74,81 +35,6 @@ fn open_powershell_with_command(_window: Window, command: String) -> Result<(), 
         Err("Функция доступна только на Windows".to_string())
     }
 }
-
-
-#[cfg(target_os = "windows")]
-fn try_windows_ssh(connection_string: &str, password: &str) -> Result<Vec<String>, String> {
-    // Подготовка команды для сохранения пароля во временный файл
-    let temp_dir = std::env::temp_dir();
-    let password_file = temp_dir.join("ssh_temp_pass.txt");
-    
-    // Записываем пароль во временный файл
-    std::fs::write(&password_file, password)
-        .map_err(|e| format!("Не удалось сохранить пароль во временный файл: {}", e))?;
-    
-    // Создаём PowerShell скрипт для выполнения SSH с автоматическим вводом пароля
-    let ps_script = format!(
-        "$password = Get-Content \"{}\" | ConvertTo-SecureString -AsPlainText -Force; \
-         $cred = New-Object System.Management.Automation.PSCredential ('dummy', $password); \
-         $connection = \"{}\"; \
-         $host_part = $connection.Split('@')[1]; \
-         $user_part = $connection.Split('@')[0]; \
-         $result = $null; \
-         try {{ \
-            $result = Invoke-Command -ComputerName $host_part -Credential $cred -ScriptBlock {{ ls -la }} -ErrorAction Stop; \
-         }} catch {{ \
-            # Если Invoke-Command не работает, пробуем через обычный SSH \
-            $result = ssh -o \"StrictHostKeyChecking=no\" $connection \"ls -la\" 2>&1; \
-         }}; \
-         if ($result) {{ $result }} else {{ Write-Error \"Не удалось выполнить команду\" }}; \
-         # Удаляем временный файл с паролем \
-         Remove-Item \"{}\" -Force;",
-        password_file.to_string_lossy(),
-        connection_string,
-        password_file.to_string_lossy()
-    );
-    
-    // Сохраняем PowerShell скрипт во временный файл
-    let ps_script_file = temp_dir.join("ssh_script.ps1");
-    std::fs::write(&ps_script_file, ps_script)
-        .map_err(|e| format!("Не удалось сохранить PowerShell скрипт: {}", e))?;
-    
-    // Запускаем PowerShell скрипт с повышенными правами
-    let output = Command::new("powershell")
-        .args([
-            "-ExecutionPolicy", "Bypass",
-            "-File", &ps_script_file.to_string_lossy()
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("Ошибка выполнения PowerShell: {}", e))?;
-    
-    // Удаляем временный файл со скриптом
-    let _ = std::fs::remove_file(ps_script_file);
-    
-    // Обрабатываем вывод
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        if err.contains("Permission denied") {
-            return Err("Неверный пароль или имя пользователя".into());
-        }
-        return Err(format!("PowerShell вернул ошибку: {}", err));
-    }
-    
-    let out = String::from_utf8_lossy(&output.stdout);
-    let dirs = out.lines()
-        .map(String::from)
-        .filter(|l| !l.is_empty())
-        .collect::<Vec<_>>();
-        
-    if dirs.is_empty() {
-        return Err("Не удалось получить список директорий".into());
-    }
-    
-    Ok(dirs)
-}
-
 
 #[cfg(not(target_os = "windows"))]
 fn try_sshpass(connection_string: &str, password: &str) -> Result<Vec<String>, String> {
@@ -186,106 +72,49 @@ fn try_sshpass(connection_string: &str, password: &str) -> Result<Vec<String>, S
     Ok(directories)
 }
 
-fn try_direct_ssh(connection_string: &str, password: &str) -> Result<Vec<String>, String> {
-    // Создаем процесс ssh с поддержкой интерактивного ввода пароля
-    let mut cmd = Command::new("ssh");
-    cmd.args([
-        "-o", "StrictHostKeyChecking=no",
-        connection_string,
-        "ls", "-la"
-    ])
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
 
-    // Запускаем процесс
-    let mut child = cmd.spawn()
-        .map_err(|e| format!("Ошибка запуска SSH: {}", e))?;
 
-    // Получаем stdin и stderr
-    if let (Some(mut stdin), Some(stderr)) = (child.stdin.take(), child.stderr.take()) {
-        // Создаем читателя для stderr
-        let stderr_reader = BufReader::new(stderr);
-        
-        // Клонируем пароль для использования в потоке
-        let password = password.to_string();
-        
-        // Запускаем поток для мониторинга stderr и ввода пароля при необходимости
-        let handle = thread::spawn(move || {
-            for line in stderr_reader.lines() {
-                if let Ok(line) = line {
-                    // Если видим запрос пароля, вводим его
-                    if line.contains("password:") || line.contains("Password:") {
-                        thread::sleep(Duration::from_millis(500));
-                        
-                        if let Err(e) = stdin.write_all(format!("{}\n", password).as_bytes()) {
-                            eprintln!("Ошибка при вводе пароля: {}", e);
-                            return false;
-                        }
-                        
-                        if let Err(e) = stdin.flush() {
-                            eprintln!("Ошибка при отправке пароля: {}", e);
-                            return false;
-                        }
-                        
-                        return true; // Пароль введен успешно
-                    } else if line.contains("Permission denied") {
-                        // Ошибка аутентификации
-                        return false;
-                    }
-                }
-            }
-            
-            false // Пароль не запрашивался или произошла ошибка
-        });
-        
-        // Ждем завершения ввода пароля (максимум 10 секунд)
-        let timeout = Duration::from_secs(10);
-        let start = std::time::Instant::now();
-        
-        while start.elapsed() < timeout {
-            if handle.is_finished() {
-                break;
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-    }
+#[command]
+fn list_remote_directories(_window: Window,
+                           connection_string: String,
+                           password: String) -> Result<Vec<String>, String> {
+    // разбиваем user@host
+    let mut parts = connection_string.splitn(2, '@');
+    let user = parts.next().ok_or("Неверный формат подключения")?;
+    let host = parts.next().ok_or("Неверный формат подключения")?;
+    let addr = format!("{}:22", host);
 
-    // Ждем завершения процесса и получаем вывод
-    let result = child.wait_with_output();
-    
-    // Обрабатываем результат
-    let output = match result {
-        Ok(output) => output,
-        Err(e) => {
-            return Err(format!("Ошибка получения вывода SSH: {}", e));
-        }
-    };
+    // подключаемся по TCP
+    let tcp = TcpStream::connect(&addr)
+        .map_err(|e| format!("Не удалось подключиться к {}: {}", addr, e))?;
+    let mut sess = Session::new().unwrap();
+    sess.set_tcp_stream(tcp);
+    sess.handshake()
+        .map_err(|e| format!("SSH handshake failed: {}", e))?;
+    sess.userauth_password(user, &password)
+        .map_err(|e| format!("Аутентификация не удалась: {}", e))?;
 
-    // Проверяем успешность выполнения
-    if !output.status.success() {
-        let error = String::from_utf8_lossy(&output.stderr);
-        
-        if error.contains("Permission denied") {
-            return Err("Неверный пароль или имя пользователя".to_string());
-        }
-        
-        return Err(format!("Ошибка SSH: {}", error));
-    }
+    // открываем сессию и выполняем ls
+    let mut channel = sess.channel_session()
+        .map_err(|e| format!("Не удалось открыть канал: {}", e))?;
+    channel.exec("ls -la")
+        .map_err(|e| format!("Не удалось выполнить команду: {}", e))?;
+    let mut output = String::new();
+    channel.read_to_string(&mut output)
+        .map_err(|e| format!("Не удалось прочитать вывод: {}", e))?;
+    channel.wait_close().ok();
 
-    // Обрабатываем stdout
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let directories: Vec<String> = stdout
+    // парсим строки
+    let dirs = output
         .lines()
-        .filter(|line| !line.is_empty())
+        .filter(|l| !l.is_empty())
         .map(String::from)
-        .collect();
-
-    if directories.is_empty() {
-        return Err("Не удалось получить список файлов или директория пуста".to_string());
+        .collect::<Vec<_>>();
+    if dirs.is_empty() {
+        Err("Список директорий пуст".into())
+    } else {
+        Ok(dirs)
     }
-    
-    Ok(directories)
 }
 
 fn main() {
