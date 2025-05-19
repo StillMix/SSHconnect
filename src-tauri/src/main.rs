@@ -19,113 +19,142 @@ fn list_remote_directories(_window: Window, connection_string: String, password:
     // Сначала проверим, является ли система Windows
     #[cfg(target_os = "windows")]
     {
-        // Используем plink в Windows, если он доступен
-        let plink_result = try_plink(username, server, &password);
-        if let Ok(directories) = plink_result {
-            return Ok(directories);
+        // Пробуем использовать команду cmd для перенаправления пароля в ssh
+        match try_windows_ssh(connection_string.as_str(), password.as_str()) {
+            Ok(directories) => return Ok(directories),
+            Err(e) => {
+                eprintln!("Windows SSH метод не удался: {}", e);
+                // Если метод Windows SSH не сработал, пробуем прямой SSH
+                return try_direct_ssh(&connection_string, &password);
+            }
         }
     }
     
-    // Для Linux/Mac, сначала попробуем sshpass
+    // Для Linux/Mac
     #[cfg(not(target_os = "windows"))]
     {
-        let sshpass_result = try_sshpass(&connection_string, &password);
-        if let Ok(directories) = sshpass_result {
-            return Ok(directories);
+        // Пробуем сначала sshpass
+        match try_sshpass(&connection_string, &password) {
+            Ok(directories) => return Ok(directories),
+            Err(e) => {
+                eprintln!("sshpass метод не удался: {}", e);
+                // Пробуем прямой SSH
+                return try_direct_ssh(&connection_string, &password);
+            }
         }
     }
+}
+
+#[command]
+fn open_powershell_with_command(_window: Window, command: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        // Запускаем PowerShell с повышенными привилегиями и выполняем команду
+        let args = vec![
+            "-NoExit",  // Оставляем окно открытым
+            "-Command",
+            &format!("Start-Process PowerShell -Verb RunAs -ArgumentList '-NoExit -Command \"{}\"'", command)
+        ];
+        
+        Command::new("powershell")
+            .args(&args)
+            .spawn()
+            .map_err(|e| format!("Не удалось запустить PowerShell: {}", e))?;
+            
+        Ok(())
+    }
     
-    // Если предыдущие методы не сработали, используем прямой SSH
-    try_direct_ssh(&connection_string, &password)
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Функция доступна только на Windows".to_string())
+    }
 }
 
 #[cfg(target_os = "windows")]
-fn try_plink(username: &str, server: &str, password: &str) -> Result<Vec<String>, String> {
-    // Проверяем наличие plink
-    let plink_check = Command::new("where")
-        .arg("plink")
-        .output();
+fn try_windows_ssh(connection_string: &str, password: &str) -> Result<Vec<String>, String> {
+    // Создаем временный файл для хранения пароля
+    use tempfile::NamedTempFile;
+    let mut temp_file = NamedTempFile::new()
+        .map_err(|e| format!("Не удалось создать временный файл: {}", e))?;
         
-    if let Ok(output) = plink_check {
-        if output.status.success() {
-            // Используем plink для подключения с передачей пароля
-            let mut cmd = Command::new("plink");
-            cmd.args([
-                "-batch",
-                "-ssh",
-                &format!("{}@{}", username, server),
-                "-pw", password,
-                "ls", "-la"
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-               
-            let output = cmd.output()
-                .map_err(|e| format!("Ошибка выполнения plink: {}", e))?;
-                
-            if !output.status.success() {
-                let error = String::from_utf8_lossy(&output.stderr);
-                return Err(format!("Ошибка SSH: {}", error));
-            }
-            
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let directories: Vec<String> = stdout
-                .lines()
-                .filter(|line| !line.is_empty())
-                .map(String::from)
-                .collect();
-            
-            return Ok(directories);
+    // Записываем пароль во временный файл
+    temp_file.write_all(password.as_bytes())
+        .map_err(|e| format!("Не удалось записать во временный файл: {}", e))?;
+        
+    let password_file = temp_file.path().to_string_lossy().to_string();
+    
+    // Создаем процесс ssh с подачей пароля через файл
+    let output = Command::new("cmd")
+        .args([
+            "/C", 
+            &format!("type \"{}\" | ssh -o StrictHostKeyChecking=no {} ls -la", password_file, connection_string)
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("Ошибка выполнения SSH: {}", e))?;
+        
+    // Проверяем результат
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr);
+        if error.contains("Permission denied") {
+            return Err("Неверный пароль или имя пользователя".to_string());
         }
+        return Err(format!("Ошибка SSH: {}", error));
     }
     
-    Err("plink не найден в системе".to_string())
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let directories: Vec<String> = stdout
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(String::from)
+        .collect();
+    
+    if directories.is_empty() {
+        return Err("Не удалось получить список файлов через SSH".to_string());
+    }
+    
+    Ok(directories)
 }
 
 #[cfg(not(target_os = "windows"))]
 fn try_sshpass(connection_string: &str, password: &str) -> Result<Vec<String>, String> {
-    let sshpass_check = Command::new("which")
-        .arg("sshpass")
-        .output();
-        
-    if let Ok(output) = sshpass_check {
-        if output.status.success() {
-            // sshpass доступен, используем его
-            let mut cmd = Command::new("sshpass");
-            cmd.args([
-                "-p", password,
-                "ssh", 
-                "-o", "StrictHostKeyChecking=no",
-                connection_string,
-                "ls", "-la"
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-            
-            let output = cmd.output()
-                .map_err(|e| format!("Ошибка выполнения sshpass: {}", e))?;
-                
-            if !output.status.success() {
-                let error = String::from_utf8_lossy(&output.stderr);
-                return Err(format!("Ошибка SSH: {}", error));
-            }
-            
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let directories: Vec<String> = stdout
-                .lines()
-                .filter(|line| !line.is_empty())
-                .map(String::from)
-                .collect();
-            
-            return Ok(directories);
-        }
+    // Проверяем наличие sshpass
+    if Command::new("which").arg("sshpass").output().is_err() {
+        return Err("sshpass не найден в системе".to_string());
     }
     
-    Err("sshpass не найден в системе".to_string())
+    // sshpass доступен, используем его
+    let output = Command::new("sshpass")
+        .args([
+            "-p", password,
+            "ssh", 
+            "-o", "StrictHostKeyChecking=no",
+            connection_string,
+            "ls", "-la"
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("Ошибка выполнения sshpass: {}", e))?;
+            
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Ошибка SSH через sshpass: {}", error));
+    }
+        
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let directories: Vec<String> = stdout
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(String::from)
+        .collect();
+        
+    Ok(directories)
 }
 
 fn try_direct_ssh(connection_string: &str, password: &str) -> Result<Vec<String>, String> {
-    // Создаем процесс ssh
+    // Создаем процесс ssh с поддержкой интерактивного ввода пароля
     let mut cmd = Command::new("ssh");
     cmd.args([
         "-o", "StrictHostKeyChecking=no",
@@ -140,45 +169,69 @@ fn try_direct_ssh(connection_string: &str, password: &str) -> Result<Vec<String>
     let mut child = cmd.spawn()
         .map_err(|e| format!("Ошибка запуска SSH: {}", e))?;
 
-    // Проверяем stdin и stderr
-    if child.stdin.is_some() && child.stderr.is_some() {
-        let stdin = child.stdin.take().unwrap();
-        let stderr = child.stderr.take().unwrap();
-        
+    // Получаем stdin и stderr
+    if let (Some(mut stdin), Some(stderr)) = (child.stdin.take(), child.stderr.take()) {
         // Создаем читателя для stderr
         let stderr_reader = BufReader::new(stderr);
-        let password_clone = password.to_string();
-        let mut stdin_clone = stdin;
-
-        // Запускаем отдельный поток для мониторинга stderr
-        thread::spawn(move || {
-            // Читаем строки из stderr
+        
+        // Клонируем пароль для использования в потоке
+        let password = password.to_string();
+        
+        // Запускаем поток для мониторинга stderr и ввода пароля при необходимости
+        let handle = thread::spawn(move || {
             for line in stderr_reader.lines() {
                 if let Ok(line) = line {
                     // Если видим запрос пароля, вводим его
-                    if line.contains("password") {
-                        // Небольшая задержка перед вводом пароля
+                    if line.contains("password:") || line.contains("Password:") {
                         thread::sleep(Duration::from_millis(500));
                         
-                        // Вводим пароль и перевод строки
-                        let _ = stdin_clone.write_all(format!("{}\n", password_clone).as_bytes());
-                        let _ = stdin_clone.flush();
-                        break;
+                        if let Err(e) = stdin.write_all(format!("{}\n", password).as_bytes()) {
+                            eprintln!("Ошибка при вводе пароля: {}", e);
+                            return false;
+                        }
+                        
+                        if let Err(e) = stdin.flush() {
+                            eprintln!("Ошибка при отправке пароля: {}", e);
+                            return false;
+                        }
+                        
+                        return true; // Пароль введен успешно
+                    } else if line.contains("Permission denied") {
+                        // Ошибка аутентификации
+                        return false;
                     }
                 }
             }
+            
+            false // Пароль не запрашивался или произошла ошибка
         });
+        
+        // Ждем завершения ввода пароля (максимум 10 секунд)
+        let timeout = Duration::from_secs(10);
+        let start = std::time::Instant::now();
+        
+        while start.elapsed() < timeout {
+            if handle.is_finished() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
     }
 
     // Ждем завершения процесса и получаем вывод
-    let output = child.wait_with_output()
-        .map_err(|e| format!("Ошибка получения вывода SSH: {}", e))?;
+    let output = match child.wait_with_output() {
+        Ok(output) => output,
+        Err(e) => {
+            // Принудительно завершаем процесс, если он все еще выполняется
+            let _ = child.kill();
+            return Err(format!("Ошибка получения вывода SSH: {}", e));
+        }
+    };
 
     // Проверяем успешность выполнения
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr);
         
-        // Если ошибка содержит "Permission denied", значит пароль неверный
         if error.contains("Permission denied") {
             return Err("Неверный пароль или имя пользователя".to_string());
         }
@@ -195,7 +248,7 @@ fn try_direct_ssh(connection_string: &str, password: &str) -> Result<Vec<String>
         .collect();
 
     if directories.is_empty() {
-        return Err("Не удалось получить список файлов. Директория может быть пустой или возникла ошибка.".to_string());
+        return Err("Не удалось получить список файлов или директория пуста".to_string());
     }
     
     Ok(directories)
@@ -206,7 +259,10 @@ fn main() {
     let context = tauri::generate_context!();
     
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![list_remote_directories])
+        .invoke_handler(tauri::generate_handler![
+            list_remote_directories,
+            open_powershell_with_command
+        ])
         .run(context)
         .expect("Ошибка при запуске Tauri приложения");
 }
