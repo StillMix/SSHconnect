@@ -13,8 +13,8 @@ fn list_remote_directories(_window: Window, connection_string: String, password:
         return Err("Неверный формат строки подключения. Используйте формат username@serverip".to_string());
     }
 
-    let username = parts[0];
-    let server = parts[1];
+    let _username = parts[0];
+    let _server = parts[1];
     
     // Сначала проверим, является ли система Windows
     #[cfg(target_os = "windows")]
@@ -49,73 +49,74 @@ fn list_remote_directories(_window: Window, connection_string: String, password:
 fn open_powershell_with_command(_window: Window, command: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        // Запускаем PowerShell с повышенными привилегиями и выполняем команду
+        // Сначала создаём строку с аргументом
+        let runas_arg = format!(
+            "Start-Process PowerShell -Verb RunAs -ArgumentList '-NoExit -Command \"{}\"'",
+            command
+        );
+
+        // А потом уже передаём ссылки на статичные &str и на &runas_arg
         let args = vec![
-            "-NoExit",  // Оставляем окно открытым
+            "-NoExit",
             "-Command",
-            &format!("Start-Process PowerShell -Verb RunAs -ArgumentList '-NoExit -Command \"{}\"'", command)
+            &runas_arg,
         ];
-        
+
         Command::new("powershell")
             .args(&args)
             .spawn()
             .map_err(|e| format!("Не удалось запустить PowerShell: {}", e))?;
-            
         Ok(())
     }
-    
+
     #[cfg(not(target_os = "windows"))]
     {
         Err("Функция доступна только на Windows".to_string())
     }
 }
 
+
 #[cfg(target_os = "windows")]
 fn try_windows_ssh(connection_string: &str, password: &str) -> Result<Vec<String>, String> {
-    // Создаем временный файл для хранения пароля
+    // 1. Создаём временный файл и пишем в него пароль
     use tempfile::NamedTempFile;
     let mut temp_file = NamedTempFile::new()
         .map_err(|e| format!("Не удалось создать временный файл: {}", e))?;
-        
-    // Записываем пароль во временный файл
     temp_file.write_all(password.as_bytes())
-        .map_err(|e| format!("Не удалось записать во временный файл: {}", e))?;
-        
-    let password_file = temp_file.path().to_string_lossy().to_string();
-    
-    // Создаем процесс ssh с подачей пароля через файл
+        .map_err(|e| format!("Не удалось записать пароль: {}", e))?;
+    let password_file = temp_file.path().to_string_lossy().into_owned();
+
+    // 2. Формируем команду заранее и хранем её в String
+    let ssh_cmd = format!(
+        "type \"{}\" | ssh -o StrictHostKeyChecking=no {} ls -la",
+        password_file, connection_string
+    );
+
+    // 3. Вызываем cmd, прокидывая ссылку на живой ssh_cmd
     let output = Command::new("cmd")
-        .args([
-            "/C", 
-            &format!("type \"{}\" | ssh -o StrictHostKeyChecking=no {} ls -la", password_file, connection_string)
-        ])
+        .args(&["/C", &ssh_cmd])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
         .map_err(|e| format!("Ошибка выполнения SSH: {}", e))?;
-        
-    // Проверяем результат
+
+    // 4. Обработка результата как раньше
     if !output.status.success() {
-        let error = String::from_utf8_lossy(&output.stderr);
-        if error.contains("Permission denied") {
-            return Err("Неверный пароль или имя пользователя".to_string());
+        let err = String::from_utf8_lossy(&output.stderr);
+        if err.contains("Permission denied") {
+            return Err("Неверный пароль или имя пользователя".into());
         }
-        return Err(format!("Ошибка SSH: {}", error));
+        return Err(format!("SSH вернул ошибку: {}", err));
     }
-    
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let directories: Vec<String> = stdout
-        .lines()
-        .filter(|line| !line.is_empty())
-        .map(String::from)
-        .collect();
-    
-    if directories.is_empty() {
-        return Err("Не удалось получить список файлов через SSH".to_string());
+
+    let out = String::from_utf8_lossy(&output.stdout);
+    let dirs = out.lines().map(String::from).filter(|l| !l.is_empty()).collect::<Vec<_>>();
+    if dirs.is_empty() {
+        return Err("Не удалось получить список директорий".into());
     }
-    
-    Ok(directories)
+    Ok(dirs)
 }
+
 
 #[cfg(not(target_os = "windows"))]
 fn try_sshpass(connection_string: &str, password: &str) -> Result<Vec<String>, String> {
@@ -219,11 +220,12 @@ fn try_direct_ssh(connection_string: &str, password: &str) -> Result<Vec<String>
     }
 
     // Ждем завершения процесса и получаем вывод
-    let output = match child.wait_with_output() {
+    let result = child.wait_with_output();
+    
+    // Обрабатываем результат
+    let output = match result {
         Ok(output) => output,
         Err(e) => {
-            // Принудительно завершаем процесс, если он все еще выполняется
-            let _ = child.kill();
             return Err(format!("Ошибка получения вывода SSH: {}", e));
         }
     };
