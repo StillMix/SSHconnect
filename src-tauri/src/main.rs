@@ -122,48 +122,6 @@ fn try_sshpass(connection_string: &str, password: &str) -> Result<Vec<String>, S
 }
 
 
-#[command]
-fn list_remote_directories(_window: Window,
-                           connection_string: String,
-                           password: String) -> Result<Vec<String>, String> {
-    // разбиваем user@host
-    let mut parts = connection_string.splitn(2, '@');
-    let user = parts.next().ok_or("Неверный формат подключения")?;
-    let host = parts.next().ok_or("Неверный формат подключения")?;
-    let addr = format!("{}:22", host);
-
-    // подключаемся по TCP
-    let tcp = TcpStream::connect(&addr)
-        .map_err(|e| format!("Не удалось подключиться к {}: {}", addr, e))?;
-    let mut sess = Session::new().unwrap();
-    sess.set_tcp_stream(tcp);
-    sess.handshake()
-        .map_err(|e| format!("SSH handshake failed: {}", e))?;
-    sess.userauth_password(user, &password)
-        .map_err(|e| format!("Аутентификация не удалась: {}", e))?;
-
-    // открываем сессию и выполняем ls
-    let mut channel = sess.channel_session()
-        .map_err(|e| format!("Не удалось открыть канал: {}", e))?;
-    channel.exec("ls -la")
-        .map_err(|e| format!("Не удалось выполнить команду: {}", e))?;
-    let mut output = String::new();
-    channel.read_to_string(&mut output)
-        .map_err(|e| format!("Не удалось прочитать вывод: {}", e))?;
-    channel.wait_close().ok();
-
-    // парсим строки
-    let dirs = output
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(String::from)
-        .collect::<Vec<_>>();
-    if dirs.is_empty() {
-        Err("Список директорий пуст".into())
-    } else {
-        Ok(dirs)
-    }
-}
 
 #[command]
 fn save_remote_file(_window: Window,
@@ -179,17 +137,13 @@ fn save_remote_file(_window: Window,
     temp_file.write_all(content.as_bytes())
         .map_err(|e| format!("Не удалось записать содержимое во временный файл: {}", e))?;
     
-    // Получаем путь к временному файлу
-    let temp_path = temp_file.path().to_string_lossy().to_string();
     
     // Устанавливаем SSH соединение
     let sess = connect_ssh(&connection_string, &password)?;
     
     // Разбираем путь на директорию и имя файла
     let remote_path = Path::new(&path);
-    let file_name = remote_path.file_name()
-        .ok_or("Неверный путь к файлу")?
-        .to_string_lossy();
+
     
     // Открываем канал SCP для записи файла
     let mut remote_file = sess.scp_send(
