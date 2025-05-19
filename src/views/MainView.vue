@@ -93,6 +93,13 @@ function parseDirectoryListing(listing: string[]): FileEntry[] {
     .filter((e) => e.name !== '.' && e.name !== '..')
 }
 
+// отключение и возврат к экрану подключения
+function disconnect() {
+  connected.value = false
+  connectionStatus.value = 'Не подключено'
+  fileEntries.value = []
+}
+
 // остальные утилиты
 function togglePasswordVisibility() {
   showPassword.value = !showPassword.value
@@ -131,54 +138,62 @@ async function installPoshSSH() {
   <div class="container">
     <h1>SSH Подключение</h1>
     <div
+      v-if="!connected"
       class="status-indicator"
       :class="{ connected: connected, error: error, connecting: loading }"
     >
       {{ connectionStatus }}
     </div>
 
-    <div v-if="isWindows" class="windows-info">
-      <h3>Подключение на Windows</h3>
-      <p>{{ windowsHelpText }}</p>
-      <div class="windows-help-buttons">
-        <button @click="openHelpLink" class="help-button">Узнать больше об OpenSSH</button>
-        <button @click="installPoshSSH" class="help-button">Установить Posh-SSH</button>
-      </div>
-    </div>
-
-    <div class="connection-form">
-      <div class="input-group">
-        <input
-          v-model="connectionString"
-          placeholder="username@serverip"
-          @keyup.enter="connectAndListDirectories"
-        />
+    <!-- Форма подключения - показывается только когда нет подключения -->
+    <div v-if="!connected">
+      <div v-if="isWindows" class="windows-info">
+        <h3>Подключение на Windows</h3>
+        <p>{{ windowsHelpText }}</p>
+        <div class="windows-help-buttons">
+          <button @click="openHelpLink" class="help-button">Узнать больше об OpenSSH</button>
+          <button @click="installPoshSSH" class="help-button">Установить Posh-SSH</button>
+        </div>
       </div>
 
-      <div class="password-group">
-        <input
-          :type="showPassword ? 'text' : 'password'"
-          v-model="password"
-          placeholder="Пароль"
-          @keyup.enter="connectAndListDirectories"
-        />
-        <button class="password-toggle" @click="togglePasswordVisibility">
-          {{ showPassword ? 'Скрыть' : 'Показать' }}
+      <div class="connection-form">
+        <div class="input-group">
+          <input
+            v-model="connectionString"
+            placeholder="username@serverip"
+            @keyup.enter="connectAndListDirectories"
+          />
+        </div>
+
+        <div class="password-group">
+          <input
+            :type="showPassword ? 'text' : 'password'"
+            v-model="password"
+            placeholder="Пароль"
+            @keyup.enter="connectAndListDirectories"
+          />
+          <button class="password-toggle" @click="togglePasswordVisibility">
+            {{ showPassword ? 'Скрыть' : 'Показать' }}
+          </button>
+        </div>
+
+        <button class="connect-button" @click="connectAndListDirectories" :disabled="loading">
+          {{ loading ? 'Подключение...' : connected ? 'Переподключиться' : 'Подключиться' }}
         </button>
-      </div>
 
-      <button class="connect-button" @click="connectAndListDirectories" :disabled="loading">
-        {{ loading ? 'Подключение...' : connected ? 'Переподключиться' : 'Подключиться' }}
-      </button>
-
-      <div v-if="error" class="error-message">
-        <p v-for="(line, index) in error.split('\n')" :key="index">{{ line }}</p>
+        <div v-if="error" class="error-message">
+          <p v-for="(line, index) in error.split('\n')" :key="index">{{ line }}</p>
+        </div>
       </div>
     </div>
 
+    <!-- Просмотр директорий - показывается только при подключении -->
     <div v-if="connected" class="directory-view">
-      <div class="directory-path">
-        <h3>Текущая директория: {{ currentDirectory }}</h3>
+      <div class="directory-header">
+        <div class="directory-path">
+          <h3>{{ connectionString }} [{{ currentDirectory }}]</h3>
+        </div>
+        <button class="disconnect-button" @click="disconnect">Отключиться</button>
       </div>
 
       <div class="directory-list">
@@ -331,6 +346,21 @@ input {
   background-color: #45a049;
 }
 
+.disconnect-button {
+  padding: 8px 16px;
+  background-color: #f44336;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: background-color 0.3s;
+}
+
+.disconnect-button:hover {
+  background-color: #d32f2f;
+}
+
 button:disabled {
   background-color: #cccccc;
   cursor: not-allowed;
@@ -348,14 +378,20 @@ button:disabled {
   background-color: #f5f5f5;
   border-radius: 8px;
   padding: 20px;
-  margin-top: 20px;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 }
 
-.directory-path {
+.directory-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
   margin-bottom: 15px;
   padding-bottom: 10px;
   border-bottom: 1px solid #ddd;
+}
+
+.directory-path {
+  flex: 1;
 }
 
 .directory-list {
