@@ -128,9 +128,18 @@ function disconnect() {
   pathHistory.value = ['/']
 }
 
-// обработчик ошибок из WindowsHelp
-function handleWindowsError(errorMessage: string) {
+// обработчик ошибок
+function handleError(errorMessage: string) {
   error.value = errorMessage
+
+  // Автоматически скрываем сообщение об успешном сохранении через 3 секунды
+  if (errorMessage.includes('успешно сохранен')) {
+    setTimeout(() => {
+      if (error.value === errorMessage) {
+        error.value = ''
+      }
+    }, 3000)
+  }
 }
 </script>
 
@@ -139,7 +148,11 @@ function handleWindowsError(errorMessage: string) {
     <h1>SSH Подключение</h1>
 
     <!-- Сообщение об ошибке - показывается всегда, если есть ошибка -->
-    <div v-if="error" class="error-message">
+    <div
+      v-if="error"
+      class="error-message"
+      :class="{ 'success-message': error.includes('успешно сохранен') }"
+    >
       <p v-for="(line, index) in error.split('\n')" :key="index">{{ line }}</p>
     </div>
 
@@ -157,7 +170,7 @@ function handleWindowsError(errorMessage: string) {
       <WindowsHelp
         :is-windows="isWindows"
         :windows-help-text="windowsHelpText"
-        @error="handleWindowsError"
+        @error="handleError"
       />
     </div>
 
@@ -166,12 +179,14 @@ function handleWindowsError(errorMessage: string) {
       v-if="connected"
       :file-entries="fileEntries"
       :connection-string="connectionString"
+      :password="password"
       :current-path="currentPath"
       :path-history="pathHistory"
       :loading="loading"
       @disconnect="disconnect"
       @change-path="changePath"
       @navigate-back="navigateBack"
+      @error="handleError"
     />
   </div>
 </template>
@@ -195,5 +210,11 @@ h1 {
   border-radius: 4px;
   border-left: 4px solid #d32f2f;
   margin-bottom: 15px;
+}
+
+.success-message {
+  color: #2e7d32;
+  background-color: #e8f5e9;
+  border-left: 4px solid #4caf50;
 }
 </style>
