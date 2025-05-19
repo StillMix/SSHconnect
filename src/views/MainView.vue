@@ -1,3 +1,68 @@
+<template>
+  <div class="container">
+    <h1>SSH Подключение</h1>
+
+    <!-- Сообщение об ошибке - показывается всегда, если есть ошибка -->
+    <div
+      v-if="error"
+      class="error-message"
+      :class="{ 'success-message': error.includes('успешно сохранен') }"
+    >
+      <p v-for="(line, index) in error.split('\n')" :key="index">{{ line }}</p>
+    </div>
+
+    <!-- Форма подключения - показывается только когда нет подключения -->
+    <div v-if="!connected">
+      <ConnectionForm
+        :loading="loading"
+        :connected="connected"
+        :error="error"
+        :connection-status="connectionStatus"
+        :is-windows="isWindows"
+        @connect="connectAndListDirectories"
+      />
+
+      <WindowsHelp
+        :is-windows="isWindows"
+        :windows-help-text="windowsHelpText"
+        @error="handleError"
+      />
+    </div>
+
+    <!-- Просмотр директорий - показывается только при подключении -->
+    <template v-if="connected">
+      <div class="view-controls">
+        <button class="multi-view-toggle" @click="toggleMultiView">
+          {{ showMultiView ? 'Скрыть дополнительные виды' : 'Показать дополнительные виды' }}
+        </button>
+      </div>
+
+      <DirectoryViewer
+        :file-entries="fileEntries"
+        :connection-string="connectionString"
+        :password="password"
+        :current-path="currentPath"
+        :path-history="pathHistory"
+        :loading="loading"
+        @disconnect="disconnect"
+        @change-path="changePath"
+        @navigate-back="navigateBack"
+        @error="handleError"
+      />
+
+      <!-- Дополнительные виды -->
+      <MultiView
+        v-if="showMultiView"
+        :connection-string="connectionString"
+        :password="password"
+        :main-path="currentPath"
+        @error="handleError"
+        @file-selected="handleFileSelectedFromView"
+      />
+    </template>
+  </div>
+</template>
+
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 
@@ -5,6 +70,7 @@ import { platform } from '@tauri-apps/api/os'
 import ConnectionForm from '@/components/ConnectionForm.vue'
 import WindowsHelp from '@/components/WindowsHelp.vue'
 import DirectoryViewer from '@/components/DirectoryViewer.vue'
+import MultiView from '@/components/MultiView.vue'
 import { FileEntry } from '@/utils/fileUtils'
 import { listRemoteDirectories } from '@/services/sshService'
 
@@ -20,6 +86,7 @@ const pathHistory = ref<string[]>(['/'])
 const connectionStatus = ref('Не подключено')
 const isWindows = ref(false)
 const windowsHelpText = ref('')
+const showMultiView = ref(false)
 
 // при монтировании
 onMounted(async () => {
@@ -126,6 +193,7 @@ function disconnect() {
   fileEntries.value = []
   currentPath.value = '/'
   pathHistory.value = ['/']
+  showMultiView.value = false
 }
 
 // обработчик ошибок
@@ -141,55 +209,19 @@ function handleError(errorMessage: string) {
     }, 3000)
   }
 }
+
+// Переключение отображения MultiView
+function toggleMultiView() {
+  showMultiView.value = !showMultiView.value
+}
+
+// Обработчик выбора файла из дополнительного вида
+function handleFileSelectedFromView(path: string, entry: any, viewId: number) {
+  // Здесь можно обработать выбор файла из дополнительного вида
+  // Например, открыть его для редактирования
+  error.value = `Выбран файл ${entry.name} из вида ${viewId}`
+}
 </script>
-
-<template>
-  <div class="container">
-    <h1>SSH Подключение</h1>
-
-    <!-- Сообщение об ошибке - показывается всегда, если есть ошибка -->
-    <div
-      v-if="error"
-      class="error-message"
-      :class="{ 'success-message': error.includes('успешно сохранен') }"
-    >
-      <p v-for="(line, index) in error.split('\n')" :key="index">{{ line }}</p>
-    </div>
-
-    <!-- Форма подключения - показывается только когда нет подключения -->
-    <div v-if="!connected">
-      <ConnectionForm
-        :loading="loading"
-        :connected="connected"
-        :error="error"
-        :connection-status="connectionStatus"
-        :is-windows="isWindows"
-        @connect="connectAndListDirectories"
-      />
-
-      <WindowsHelp
-        :is-windows="isWindows"
-        :windows-help-text="windowsHelpText"
-        @error="handleError"
-      />
-    </div>
-
-    <!-- Просмотр директорий - показывается только при подключении -->
-    <DirectoryViewer
-      v-if="connected"
-      :file-entries="fileEntries"
-      :connection-string="connectionString"
-      :password="password"
-      :current-path="currentPath"
-      :path-history="pathHistory"
-      :loading="loading"
-      @disconnect="disconnect"
-      @change-path="changePath"
-      @navigate-back="navigateBack"
-      @error="handleError"
-    />
-  </div>
-</template>
 
 <style scoped>
 .container {
@@ -216,5 +248,26 @@ h1 {
   color: #2e7d32;
   background-color: #e8f5e9;
   border-left: 4px solid #4caf50;
+}
+
+.view-controls {
+  margin-bottom: 15px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.multi-view-toggle {
+  padding: 8px 16px;
+  background-color: #3f51b5;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: background-color 0.3s;
+}
+
+.multi-view-toggle:hover {
+  background-color: #303f9f;
 }
 </style>
