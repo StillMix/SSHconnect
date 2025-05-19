@@ -78,42 +78,74 @@ fn open_powershell_with_command(_window: Window, command: String) -> Result<(), 
 
 #[cfg(target_os = "windows")]
 fn try_windows_ssh(connection_string: &str, password: &str) -> Result<Vec<String>, String> {
-    // 1. Создаём временный файл и пишем в него пароль
-    use tempfile::NamedTempFile;
-    let mut temp_file = NamedTempFile::new()
-        .map_err(|e| format!("Не удалось создать временный файл: {}", e))?;
-    temp_file.write_all(password.as_bytes())
-        .map_err(|e| format!("Не удалось записать пароль: {}", e))?;
-    let password_file = temp_file.path().to_string_lossy().into_owned();
-
-    // 2. Формируем команду заранее и хранем её в String
-    let ssh_cmd = format!(
-        "type \"{}\" | ssh -o StrictHostKeyChecking=no {} ls -la",
-        password_file, connection_string
+    // Подготовка команды для сохранения пароля во временный файл
+    let temp_dir = std::env::temp_dir();
+    let password_file = temp_dir.join("ssh_temp_pass.txt");
+    
+    // Записываем пароль во временный файл
+    std::fs::write(&password_file, password)
+        .map_err(|e| format!("Не удалось сохранить пароль во временный файл: {}", e))?;
+    
+    // Создаём PowerShell скрипт для выполнения SSH с автоматическим вводом пароля
+    let ps_script = format!(
+        "$password = Get-Content \"{}\" | ConvertTo-SecureString -AsPlainText -Force; \
+         $cred = New-Object System.Management.Automation.PSCredential ('dummy', $password); \
+         $connection = \"{}\"; \
+         $host_part = $connection.Split('@')[1]; \
+         $user_part = $connection.Split('@')[0]; \
+         $result = $null; \
+         try {{ \
+            $result = Invoke-Command -ComputerName $host_part -Credential $cred -ScriptBlock {{ ls -la }} -ErrorAction Stop; \
+         }} catch {{ \
+            # Если Invoke-Command не работает, пробуем через обычный SSH \
+            $result = ssh -o \"StrictHostKeyChecking=no\" $connection \"ls -la\" 2>&1; \
+         }}; \
+         if ($result) {{ $result }} else {{ Write-Error \"Не удалось выполнить команду\" }}; \
+         # Удаляем временный файл с паролем \
+         Remove-Item \"{}\" -Force;",
+        password_file.to_string_lossy(),
+        connection_string,
+        password_file.to_string_lossy()
     );
-
-    // 3. Вызываем cmd, прокидывая ссылку на живой ssh_cmd
-    let output = Command::new("cmd")
-        .args(&["/C", &ssh_cmd])
+    
+    // Сохраняем PowerShell скрипт во временный файл
+    let ps_script_file = temp_dir.join("ssh_script.ps1");
+    std::fs::write(&ps_script_file, ps_script)
+        .map_err(|e| format!("Не удалось сохранить PowerShell скрипт: {}", e))?;
+    
+    // Запускаем PowerShell скрипт с повышенными правами
+    let output = Command::new("powershell")
+        .args([
+            "-ExecutionPolicy", "Bypass",
+            "-File", &ps_script_file.to_string_lossy()
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .map_err(|e| format!("Ошибка выполнения SSH: {}", e))?;
-
-    // 4. Обработка результата как раньше
+        .map_err(|e| format!("Ошибка выполнения PowerShell: {}", e))?;
+    
+    // Удаляем временный файл со скриптом
+    let _ = std::fs::remove_file(ps_script_file);
+    
+    // Обрабатываем вывод
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
         if err.contains("Permission denied") {
             return Err("Неверный пароль или имя пользователя".into());
         }
-        return Err(format!("SSH вернул ошибку: {}", err));
+        return Err(format!("PowerShell вернул ошибку: {}", err));
     }
-
+    
     let out = String::from_utf8_lossy(&output.stdout);
-    let dirs = out.lines().map(String::from).filter(|l| !l.is_empty()).collect::<Vec<_>>();
+    let dirs = out.lines()
+        .map(String::from)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>();
+        
     if dirs.is_empty() {
         return Err("Не удалось получить список директорий".into());
     }
+    
     Ok(dirs)
 }
 
