@@ -1,6 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::process::{Command};
 use tauri::{command, Window};
 use ssh2::Session;
 use std::net::TcpStream;
@@ -13,13 +12,13 @@ use std::path::Path;
 
 
 #[command]
-fn open_powershell_with_command(_window: Window, command: String) -> Result<(), String> {
+fn open_powershell_with_command(_window: Window, _command: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         // Сначала создаём строку с аргументом
         let runas_arg = format!(
             "Start-Process PowerShell -Verb RunAs -ArgumentList '-NoExit -Command \"{}\"'",
-            command
+            _command
         );
 
         // А потом уже передаём ссылки на статичные &str и на &runas_arg
@@ -84,44 +83,6 @@ fn execute_ssh_command(_window: Window,
     
     Ok(lines)
 }
-
-#[cfg(not(target_os = "windows"))]
-fn try_sshpass(connection_string: &str, password: &str) -> Result<Vec<String>, String> {
-    // Проверяем наличие sshpass
-    if Command::new("which").arg("sshpass").output().is_err() {
-        return Err("sshpass не найден в системе".to_string());
-    }
-    
-    // sshpass доступен, используем его
-    let output = Command::new("sshpass")
-        .args([
-            "-p", password,
-            "ssh", 
-            "-o", "StrictHostKeyChecking=no",
-            connection_string,
-            "ls", "-la"
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("Ошибка выполнения sshpass: {}", e))?;
-            
-    if !output.status.success() {
-        let error = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Ошибка SSH через sshpass: {}", error));
-    }
-        
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let directories: Vec<String> = stdout
-        .lines()
-        .filter(|line| !line.is_empty())
-        .map(String::from)
-        .collect();
-        
-    Ok(directories)
-}
-
-
 
 #[command]
 fn save_remote_file(_window: Window,
